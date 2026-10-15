@@ -1,6 +1,9 @@
 # =============================================================================
 # Functions for comparative analysis of caste-biased expression in termites
 #
+# 0. Combining species
+#      get_one2one_orthologs()        One-to-one orthologs from OrthoFinder output
+#      combine_exp_data()             Ortholog-matched multi-species data set
 # 1. Between-caste divergence
 #      cal_hedges_g()                 Hedges' g per gene (batch-adjusted)
 # 2. Similarity of caste-biased expression profiles
@@ -10,11 +13,247 @@
 #      cal_sample_dist()              Target vs. reference sample distances
 # 4. Cross-species comparison of caste developmental trajectories
 #      reverse_pca_multi()            Reference-based PCA projection
+# 5. Illustration
+#      plot_single_candidate_dmel()   Expression of one gene across samples
 #
-# Dependencies: dplyr (CRAN), sva (Bioconductor; used in reverse_pca_multi)
+# Dependencies: dplyr (CRAN); EDASeq (Bioconductor; used in combine_exp_data);
+#               sva (Bioconductor; used in reverse_pca_multi);
+#               ggplot2 (CRAN; used in plot_single_candidate_dmel)
 # =============================================================================
 
 library(dplyr)
+
+
+# -----------------------------------------------------------------------------
+# 0. Combining species: one-to-one orthologs
+# -----------------------------------------------------------------------------
+
+#' One-to-one ortholog table from an OrthoFinder-style orthogroup table
+#'
+#' Keeps orthogroups with exactly one gene in every species of `species_list`
+#' and returns them in the format expected by combine_exp_data().
+#'
+#' @param ortho_info   Orthogroup table (data frame or list of equal-length
+#'                     vectors): a group-ID column plus one column per species,
+#'                     holding that species' genes in the group separated by
+#'                     `sep` ("" or NA = no gene), as in OrthoFinder's
+#'                     Orthogroups.tsv.
+#' @param species_list Species that must each have exactly one gene.
+#' @param group_col    Name of the group-ID column.
+#' @param sep          Separator between gene IDs within a cell (regular expression).
+#' @return Data frame with `GeneID` (orthogroup ID) and one gene-ID column per species.
+get_one2one_orthologs = function(ortho_info,
+                                 species_list,
+                                 group_col = "Orthogroup",
+                                 sep = ",\\s*") {
+  ortho_info <- as.data.frame(ortho_info, stringsAsFactors = FALSE)
+  miss <- setdiff(c(group_col, species_list), colnames(ortho_info))
+  if (length(miss) > 0) stop("ortho_info lacks column(s): ", paste(miss, collapse = ", "))
+
+  # Number of genes per group and species (empty or NA = 0)
+  n_genes <- sapply(species_list, function(sp) {
+    x <- trimws(ortho_info[[sp]])
+    ifelse(is.na(x) | x == "", 0L, lengths(strsplit(x, sep)))
+  })
+  n_genes <- matrix(n_genes, ncol = length(species_list))
+  keep <- rowSums(n_genes == 1) == length(species_list)
+
+  out <- data.frame(GeneID = ortho_info[[group_col]][keep], stringsAsFactors = FALSE)
+  for (sp in species_list) out[[sp]] <- trimws(ortho_info[[sp]][keep])
+
+  # A gene should belong to one group only; groups sharing a gene with another
+  # retained group would duplicate its expression, so both are removed
+  for (sp in species_list) {
+    dup <- out[[sp]] %in% out[[sp]][duplicated(out[[sp]])]
+    if (any(dup)) {
+      warning(sum(dup), " group(s) removed: ", sp, " gene shared between groups.")
+      out <- out[!dup, , drop = FALSE]
+    }
+  }
+  rownames(out) <- NULL
+  message(nrow(out), " one-to-one ortholog groups across ",
+          paste(species_list, collapse = ", "), ".")
+  out
+}
+
+#' Combine per-species expression data into one ortholog-matched data set
+#'
+#' Stacks the expression matrices of several species side by side, with rows
+#' matched through a table of one-to-one orthologs, and merges the sample
+#' metadata. The output is the input format expected by cross-species
+#' analyses such as reverse_pca_multi().
+#'
+#' Rows are named by the ortholog group ID (`ortho_info$GeneID`). Ortholog
+#' groups missing in any species are removed from the abundance matrices
+#' (but kept, with NA, in `counts`, if given). The quantile-normalized matrix is computed
+#' after this filter.
+#'
+#' @param exp_data        Named list, one element per species (names = species
+#'                        codes, e.g. "Znev"). Each element holds `abundance`
+#'                        and `sampleInfo`, and optionally `abundance_correct`
+#'                        (used in place of `abundance` when present), `counts`
+#'                        and `abundance_weighted_z`.
+#' @param ortho_info      One-to-one ortholog table: one row per ortholog group,
+#'                        a `GeneID` column with the group ID, and one column per
+#'                        species code holding that species' gene ID (as in the
+#'                        row names of its expression matrices).
+#' @param quantile.method Between-sample normalization passed to
+#'                        EDASeq::betweenLaneNormalization(which = ...):
+#'                        "upper" (upper-quartile), "median" or "full".
+#' @param species_list    Species to combine, in output order. Species absent
+#'                        from `exp_data` are dropped with a message.
+#' @return List with `abundance`, `abundance.quantile`, `counts` and
+#'         `abundance_weighted_z` (each if present in all species), and the merged
+#'         `sampleInfo` (one row per column, same order as the matrices).
+combine_exp_data = function(exp_data,
+                            ortho_info,
+                            quantile.method = "upper",
+                            species_list = c("Mdar", "Mvia", "Znev", "Csec",
+                                             "Pcan", "Rgra", "Mbar")) {
+  if (!requireNamespace("EDASeq", quietly = TRUE)) stop("Please install 'EDASeq'.")
+
+  # --- Check inputs -----------------------------------------------------------
+  missing_sp <- setdiff(species_list, names(exp_data))
+  if (length(missing_sp) > 0) {
+    message("Not in exp_data, skipped: ", paste(missing_sp, collapse = ", "))
+  }
+  species_list <- intersect(species_list, names(exp_data))
+  if (length(species_list) == 0) stop("None of species_list is in exp_data.")
+
+  if (!"GeneID" %in% colnames(ortho_info)) stop("ortho_info needs a 'GeneID' column.")
+  no_ortho_col <- setdiff(species_list, colnames(ortho_info))
+  if (length(no_ortho_col) > 0) {
+    stop("ortho_info has no column for: ", paste(no_ortho_col, collapse = ", "))
+  }
+
+  # Matrix columns and metadata rows must refer to the same samples in the same
+  # order, because the merged sampleInfo is stacked in the same way as the matrices
+  for (sp in species_list) {
+    if (!identical(colnames(exp_data[[sp]]$abundance),
+                   as.character(exp_data[[sp]]$sampleInfo$Sample_ID))) {
+      stop("In ", sp, ", columns of 'abundance' do not match sampleInfo$Sample_ID.")
+    }
+  }
+
+  # --- Stack expression matrices by ortholog group ----------------------------
+  # For each species, pick the rows of its orthologs in the order of ortho_info
+  # (NA rows where a species lacks the gene), then bind species column-wise
+  stack_orthologs <- function(slot) {
+    mat <- do.call(cbind, lapply(species_list, function(sp) {
+      m <- exp_data[[sp]][[slot]]
+      matched_idx <- match(ortho_info[[sp]], rownames(m))
+      m[matched_idx, , drop = FALSE]
+    }))
+    rownames(mat) <- ortho_info$GeneID
+    mat
+  }
+  drop_incomplete <- function(mat) mat[!apply(mat, 1, anyNA), , drop = FALSE]
+
+  # Batch-corrected abundance replaces the raw abundance where available
+  for (sp in species_list) {
+    if (!is.null(exp_data[[sp]]$abundance_correct)) {
+      exp_data[[sp]]$abundance <- exp_data[[sp]]$abundance_correct
+    }
+  }
+
+  # Optional matrices: combined only if every species has them
+  in_all_species <- function(slot) {
+    all(vapply(species_list, function(sp) !is.null(exp_data[[sp]][[slot]]), logical(1)))
+  }
+
+  exp_data_full <- list()
+  if (in_all_species("counts")) {
+    exp_data_full$counts <- stack_orthologs("counts")
+  }
+  if (in_all_species("abundance_weighted_z")) {
+    exp_data_full$abundance_weighted_z <- drop_incomplete(stack_orthologs("abundance_weighted_z"))
+  }
+
+  exp_data_full$abundance <- drop_incomplete(stack_orthologs("abundance"))
+  if (nrow(exp_data_full$abundance) == 0) {
+    stop("No ortholog group is present in all species.")
+  }
+
+  # Between-sample normalization across all species (e.g. upper-quartile), so
+  # that library-wide differences between species do not dominate comparisons
+  exp_data_full$abundance.quantile <- EDASeq::betweenLaneNormalization(
+    exp_data_full$abundance, which = quantile.method, offset = FALSE, round = FALSE)
+
+  # --- Harmonize species-specific metadata ------------------------------------
+  # Bger (cockroach, non-social outgroup): stage labels shortened, and all
+  # individuals treated as the "Nymph" developmental path
+  if ("Bger" %in% species_list) {
+    si <- exp_data[["Bger"]]$sampleInfo
+    si$Stage <- as.character(factor(
+      si$Stage,
+      levels = c("Egg day 13", "Larva", "Early", "Middle", "Late", "Adult"),
+      labels = c("Egg", "Larva", "Early", "Middle", "Late", "Adult")))
+    si$Caste <- "Nymph"
+    si$Stage_Caste <- paste(si$Stage, "Nymph", sep = "_")
+    exp_data[["Bger"]]$sampleInfo <- si
+  }
+  # Zang: worker samples only, stages up to "Middle" (other labels become NA);
+  # no colony information
+  if ("Zang" %in% species_list) {
+    si <- exp_data[["Zang"]]$sampleInfo
+    si$Stage <- as.character(factor(si$Stage,
+                                    levels = c("Larva", "Early", "Early-Middle", "Middle")))
+    si$Stage_Caste <- paste(si$Stage, "Worker", sep = "_")
+    si$Colony <- NA
+    exp_data[["Zang"]]$sampleInfo <- si
+  }
+
+  # --- Merge sample metadata --------------------------------------------------
+  target_atr <- c("Sample_ID", "Ind", "Caste", "Colony", "Stage", "Stage_Caste",
+                  "Tissue", "Species", "BatchDate", "Batch")
+  for (sp in species_list) {
+    miss <- setdiff(target_atr, colnames(exp_data[[sp]]$sampleInfo))
+    if (length(miss) > 0) {
+      stop("sampleInfo of ", sp, " lacks column(s): ", paste(miss, collapse = ", "))
+    }
+  }
+  exp_data_full$sampleInfo <- do.call(rbind, lapply(species_list, function(sp) {
+    exp_data[[sp]]$sampleInfo[, target_atr]
+  }))
+
+  # Factor levels fix the plotting/ordering of stages and castes.
+  # Labels not in these lists would become NA, so they are reported.
+  stage_levels <- c("Egg", "Larva", "Early", "Early-Middle", "Middle", "Late",
+                    "Final", "Adult", "Adult_Late")
+  caste_levels <- c("Queen", "King", "Queen/King", "Major worker", "Nymph",
+                    "Worker", "Large_worker", "Small_worker",
+                    "Small_soldier", "Large_soldier")
+  check_levels <- function(x, levels, what) {
+    unknown <- setdiff(unique(na.omit(x)), levels)
+    if (length(unknown) > 0) {
+      warning(what, " label(s) not in the level list, set to NA: ",
+              paste(unknown, collapse = ", "))
+    }
+  }
+  check_levels(exp_data_full$sampleInfo$Stage, stage_levels, "Stage")
+  check_levels(exp_data_full$sampleInfo$Caste, caste_levels, "Caste")
+
+  si <- exp_data_full$sampleInfo
+  si$Stage <- factor(si$Stage, levels = stage_levels)
+
+  # Stage_raw: stage scheme harmonized across species. In Csec, Pcan and Znev,
+  # "Late" samples are grouped with "Middle"
+  si$Stage_raw <- si$Stage
+  si$Stage_raw[si$Stage == "Late" & si$Species %in% c("Csec", "Pcan", "Znev")] <- "Middle"
+
+  si$Caste   <- factor(si$Caste, levels = caste_levels)
+  si$Species <- factor(si$Species, levels = species_list)
+  si$Species_Stage_Caste <- paste(si$Species, si$Stage, si$Caste, sep = "_")
+
+  # Worker type of each species (FW / TW / SW); species not listed are FW
+  si$Worker_Type <- "FW"
+  si$Worker_Type[si$Species %in% c("Mdar", "Rgra")] <- "TW"
+  si$Worker_Type[si$Species %in% c("Mvia", "Mbar", "Odon", "Trin", "Mbel")] <- "SW"
+  si$Worker_Type <- factor(si$Worker_Type, levels = c("FW", "TW", "SW"))
+
+  exp_data_full$sampleInfo <- si
+  exp_data_full
+}
 
 
 # -----------------------------------------------------------------------------
@@ -432,4 +671,86 @@ reverse_pca_multi <- function(
   colnames(out)[seq_len(n_pc)] <- paste0("PC", seq_len(n_pc))
   
   return(out)
+}
+
+# -----------------------------------------------------------------------------
+# 5. Illustration: expression of a single candidate gene
+# -----------------------------------------------------------------------------
+
+#' Plot the expression of one gene, selected by its Drosophila ortholog name
+#'
+#' Several termite genes can share the same Drosophila best-hit name; the one
+#' with the highest bit score is plotted.
+#'
+#' @param dmel_name  Drosophila gene name (as in gene_info$Dmel_name), e.g. "Kr-h1".
+#' @param exp_data   One species' data: list with an expression matrix (genes x
+#'                   samples) and `sampleInfo` in the same sample order.
+#' @param gene_info  Gene annotation of that species, with columns GeneID,
+#'                   Dmel_name, Dmel_bitScore and Description.
+#' @param x, col     sampleInfo columns for the x axis and the colour.
+#' @param shape      sampleInfo column for the point shape, or a fixed shape code.
+#' @param xlabel     x-axis label.
+#' @param plot_type  "boxplot" (box plot with samples overlaid) or "point".
+#' @param abundance  Name of the expression matrix inside `exp_data`.
+#' @param size       Point size.
+#' @return A ggplot object.
+plot_single_candidate_dmel = function(dmel_name,
+                                      exp_data,
+                                      gene_info,
+                                      shape = 20,
+                                      x = "Caste",
+                                      col = "Caste",
+                                      xlabel = "Phenotype",
+                                      plot_type = c("boxplot", "point"),
+                                      abundance = "abundance",
+                                      size = 2) {
+  if (!requireNamespace("ggplot2", quietly = TRUE)) stop("Please install 'ggplot2'.")
+  plot_type <- match.arg(plot_type)
+  
+  # Genes with this Drosophila name that are present in the expression matrix;
+  # the best hit (highest bit score) is used
+  mat <- exp_data[[abundance]]
+  gene_candidates <- gene_info[gene_info$Dmel_name %in% dmel_name &
+                                 gene_info$GeneID %in% rownames(mat), , drop = FALSE]
+  if (nrow(gene_candidates) == 0) {
+    stop("No gene with Dmel_name '", dmel_name, "' found in the expression data.")
+  }
+  best <- order(gene_candidates$Dmel_bitScore, decreasing = TRUE)[1]
+  geneid    <- gene_candidates$GeneID[best]
+  gene_desc <- gene_candidates$Description[best]
+  
+  gene.data <- data.frame(Expression.level = as.numeric(mat[geneid, ]),
+                          exp_data$sampleInfo,
+                          check.names = FALSE)
+  
+  # Shape: a sampleInfo column if one is named, otherwise a fixed point shape
+  shape_aes <- if (is.character(shape) && shape %in% colnames(gene.data)) {
+    ggplot2::aes(shape = .data[[shape]])
+  } else {
+    ggplot2::aes(shape = I(shape))
+  }
+  
+  p1 <- ggplot2::ggplot(gene.data,
+                        ggplot2::aes(x = .data[[x]], colour = .data[[col]],
+                                     y = .data[["Expression.level"]])) +
+    shape_aes +
+    ggplot2::theme_bw() +
+    ggplot2::ylab("Expression abundance: log2(TPM)") +
+    ggplot2::xlab(xlabel) +
+    ggplot2::labs(title = geneid,
+                  subtitle = if (is.na(gene_desc) || gene_desc == "") dmel_name
+                             else paste0(dmel_name, " (", gene_desc, ")")) +
+    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1))
+  
+  if (plot_type == "boxplot") {
+    # Outliers are not drawn by the box plot, since every sample is shown as a point
+    p1 <- p1 +
+      ggplot2::geom_boxplot(position = ggplot2::position_dodge(0.8), outlier.shape = NA) +
+      ggplot2::geom_point(position = ggplot2::position_jitterdodge(
+        jitter.width = 0.2, dodge.width = 0.8, seed = 1),
+        size = size, alpha = 0.5)
+  } else {
+    p1 <- p1 + ggplot2::geom_point(size = size)
+  }
+  p1
 }
