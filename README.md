@@ -1,6 +1,6 @@
 # Termite-evo-devo
 
-Key code developed for **"Tracking major evolutionary transitions to superorganisms"**, including quantification of between-caste divergence, evaluation of caste gene-regulatory similarity, measurement of between-caste distance across developmental stages, and principal-component projection of cross-species caste developmental trajectories.
+Key functions developed for **"Tracking major evolutionary transitions to superorganisms"**, including quantification of between-caste divergence, evaluation of caste gene-regulatory similarity, measurement of between-caste distance across developmental stages, and principal-component projection of cross-species caste developmental trajectories.
 
 ## Repository contents
 
