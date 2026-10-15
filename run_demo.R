@@ -21,7 +21,7 @@ dir.create(out_dir, showWarnings = FALSE)
 # -----------------------------------------------------------------------------
 # Load demo data
 #   termite_exp_demo.Rdata
-#     termite_exp_data_zscore_HP : named list, one element per species, each
+#     termite_exp_data_HP : named list, one element per species, each
 #                                  holding abundance (genes x samples) and
 #                                  sampleInfo (one row per sample, same order)
 #   termite_gene_info_demo.Rdata
@@ -31,7 +31,7 @@ dir.create(out_dir, showWarnings = FALSE)
 # -----------------------------------------------------------------------------
 load("termite_exp_demo.Rdata")
 load("termite_gene_info_demo.Rdata")
-exp_list <- termite_exp_data_zscore_HP
+exp_list <- termite_exp_data_HP
 species  <- c("Csec", "Mdar", "Rgra", "Mbar")
 for (sp in species) {
   cat(sprintf("%s: %d genes x %d samples\n", sp,
@@ -59,7 +59,6 @@ one2one  <- get_one2one_orthologs(ortho_info_demo, species_list = species)
 combined <- combine_exp_data(exp_list, one2one, species_list = species)
 cat(sprintf("Combined: %d ortholog groups x %d samples\n",
             nrow(combined$abundance), ncol(combined$abundance)))
-write.csv(one2one, file.path(out_dir, "0_one2one_orthologs.csv"), row.names = FALSE)
 
 # -----------------------------------------------------------------------------
 # 1. Between-caste divergence: Hedges' g per gene, Worker vs. Nymph (the
@@ -92,12 +91,7 @@ for (sp in species) {
                   co_var = "GroupWorker",
                   ref_levels = list(Group = "Nymph")))
   res <- data.frame(gene = rownames(res), res, row.names = NULL)
-  # Gene annotation (description and Drosophila best-hit name)
-  annot <- as.data.frame(gene_info_demo[[sp]])[, c("GeneID", "Description", "Dmel_name")]
-  res <- left_join(res, annot, by = c("gene" = "GeneID"))
   hedges_tables[[sp]] <- res
-  write.csv(res, file.path(out_dir, paste0("1_hedges_g_", sp, ".csv")),
-            row.names = FALSE)
 
   hedges_summary[[sp]] <- data.frame(
     Species = sp,
@@ -115,34 +109,82 @@ write.csv(hedges_summary, file.path(out_dir, "1_hedges_g_summary.csv"),
 
 # -----------------------------------------------------------------------------
 # 2. Similarity of caste-biased expression between species: angular distance
-#    between the species' Worker-vs-Nymph Hedges' g profiles, over one-to-one
-#    orthologs expressed in all species.
+#    between the species' Worker-vs-Nymph log2 fold-change (LFC) profiles,
+#    over one-to-one orthologs that are caste DEGs in at least one species.
+#
+#    The contrasts differ from section 1 and are set in `lfc_contrasts`.
+#
+#    NOTE: illustration only. Here, LFC is the difference in mean log2(TPM)
+#    between the groups in `lfc_contrasts`, and DEGs are called with limma's
+#    moderated t-test (BH-adjusted p < 0.05) on the demo abundance data. In the
+#    manuscript, LFCs and DEGs come from formal differential expression
+#    analysis; with real data, pass those LFCs to angular_distance_matrix_cols()
+#    in the same way.
 # -----------------------------------------------------------------------------
 cat("\n[2] Angular distance between species' caste-biased expression profiles\n")
 
-g_profiles <- sapply(species, function(sp) {
-  g <- setNames(hedges_tables[[sp]]$Hedges_g, hedges_tables[[sp]]$gene)
-  g[one2one[[sp]]]
-})
-rownames(g_profiles) <- one2one$GeneID
-g_profiles <- g_profiles[complete.cases(g_profiles), ]
-cat(sprintf("Orthologs with g in all species: %d\n", nrow(g_profiles)))
+# Worker-vs-nymph contrasts for the LFC profiles (Stage_Caste groups)
+lfc_contrasts <- list(
+  Csec = list(nymph = c("Middle_Nymph", "Late_Nymph"), worker = "Middle_Worker"),
+  Mdar = list(nymph = "Middle_Nymph", worker = "Middle_Worker"),
+  Rgra = list(nymph = "Middle_Nymph", worker = "Middle_Worker"),
+  Mbar = list(nymph = "Early_Nymph",  worker = "Middle_Worker")
+)
+deg_fdr <- 0.05   # adjusted p-value threshold for calling a caste DEG
+lfc_cap <- 3      # |LFC| capped so that a few extreme genes do not dominate
 
-ang <- angular_distance_matrix_cols(g_profiles)
+if (!requireNamespace("limma", quietly = TRUE)) stop("Please install 'limma'.")
+caste_de <- lapply(setNames(species, species), function(sp) {
+  d  <- exp_list[[sp]]
+  cc <- lfc_contrasts[[sp]]
+  keep <- d$sampleInfo$Stage_Caste %in% c(cc$nymph, cc$worker)
+  group <- factor(ifelse(d$sampleInfo$Stage_Caste[keep] %in% cc$worker, "Worker", "Nymph"),
+                  levels = c("Nymph", "Worker"))
+  ab <- d$abundance[one2one[[sp]], keep, drop = FALSE]
+  # Genes constant across the compared samples cannot be tested: LFC = 0, no DEG
+  testable <- apply(ab, 1, var) > 0
+  out <- data.frame(LFC = rep(0, nrow(ab)), padj = NA_real_, row.names = one2one$GeneID)
+  # limma moderated t-test (variance shrinkage across genes, as in count-based
+  # DE methods); the Worker coefficient is the LFC in log2(TPM)
+  fit <- limma::eBayes(limma::lmFit(ab[testable, ], model.matrix(~ group)))
+  tt  <- limma::topTable(fit, coef = "groupWorker", number = Inf, sort.by = "none")
+  out$LFC[testable]  <- tt$logFC
+  out$padj[testable] <- tt$adj.P.Val
+  out
+})
+
+lfc  <- sapply(caste_de, `[[`, "LFC");  rownames(lfc)  <- one2one$GeneID
+padj <- sapply(caste_de, `[[`, "padj"); rownames(padj) <- one2one$GeneID
+is_deg <- !is.na(padj) & padj < deg_fdr
+cat("Caste DEGs per species (one-to-one orthologs):\n")
+print(data.frame(
+  Species  = species,
+  Contrast = sapply(lfc_contrasts[species], function(cc)
+    paste(cc$worker, "vs.", paste(cc$nymph, collapse = "+"))),
+  n_DEG    = colSums(is_deg)[species]
+), row.names = FALSE)
+
+# Orthologs that are DEGs in at least one species; LFC capped at +/- lfc_cap
+deg_any <- rowSums(is_deg) > 0
+lfc_profiles <- pmax(pmin(lfc[deg_any, , drop = FALSE], lfc_cap), -lfc_cap)
+cat(sprintf("Orthologs that are DEGs in at least one species: %d\n", nrow(lfc_profiles)))
+
+ang <- angular_distance_matrix_cols(lfc_profiles)
 print(round(ang, 3))
 write.csv(round(ang, 4), file.path(out_dir, "2_angular_distance_species.csv"))
 
-# Orthologs with the most consistent caste bias: same sign of g in all species,
-# ranked by the smallest |g| among species
-same_sign <- abs(rowSums(sign(g_profiles))) == length(species)
+# Orthologs with the most consistent caste bias: same sign of LFC in all
+# species, ranked by the smallest |LFC| among species
+same_sign <- abs(rowSums(sign(lfc_profiles))) == length(species)
 consistent <- data.frame(
-  Orthogroup = rownames(g_profiles),
-  round(g_profiles, 2),
-  Bias = ifelse(rowMeans(g_profiles) > 0, "Worker", "Nymph"),
-  min_abs_g = round(apply(abs(g_profiles), 1, min), 2),
+  Orthogroup = rownames(lfc_profiles),
+  round(lfc_profiles, 2),
+  Bias = ifelse(rowMeans(lfc_profiles) > 0, "Worker", "Nymph"),
+  n_species_DEG = rowSums(is_deg[deg_any, , drop = FALSE]),
+  min_abs_LFC = round(apply(abs(lfc_profiles), 1, min), 2),
   stringsAsFactors = FALSE
 )[same_sign, ]
-consistent <- consistent[order(-consistent$min_abs_g), ]
+consistent <- consistent[order(-consistent$min_abs_LFC, -consistent$n_species_DEG), ]
 
 # Annotation: first non-missing value across species, in the order of `species`
 annotate_og <- function(og, field) {
@@ -162,7 +204,7 @@ cat(sprintf("\nOrthologs biased in the same direction in all species: %d; top 10
             nrow(consistent)))
 top10 <- head(consistent, 10)
 top10$Description <- substr(top10$Description, 1, 40)
-print(top10[, c("Orthogroup", species, "Bias", "Dmel_name", "Description")],
+print(top10[, c("Orthogroup", species, "Bias", "n_species_DEG", "Dmel_name", "Description")],
       row.names = FALSE)
 
 # -----------------------------------------------------------------------------
@@ -182,13 +224,11 @@ for (sp in species) {
                         ref_stages   = stage_order,
                         dist_fun     = "man")
   dist_all[[sp]] <- df
-  write.csv(df, file.path(out_dir, paste0("3_sample_distance_", sp, ".csv")),
-            row.names = FALSE)
 }
 dist_summary <- do.call(rbind, lapply(dist_all, function(df) {
-  df %>% group_by(Species, Stage) %>%
-    summarise(median_distance = median(distance),
-              within_worker_baseline = first(dist_ref), .groups = "drop")
+  df %>% dplyr::group_by(Species, Stage) %>%
+    dplyr::summarise(median_distance = median(distance),
+              within_worker_baseline = dplyr::first(dist_ref), .groups = "drop")
 }))
 dist_summary <- as.data.frame(dist_summary)
 dist_summary <- dist_summary[order(match(dist_summary$Species, species),
@@ -202,8 +242,8 @@ write.csv(dist_summary, file.path(out_dir, "3_sample_distance_summary.csv"),
 #    C. secundus using the top 200 caste DEGs between all nymphs and
 #    Middle_Worker (among one-to-one orthologs; Welch t-test on abundance).
 #    The other species are projected onto it after ComBat alignment (species
-#    as batch, C. secundus kept unchanged). In all species, only middle- and
-#    late-stage nymphs and middle-stage workers are used (`pca_groups`), plus
+#    as batch, C. secundus kept unchanged). In all species, only early-, middle-
+#    and late-stage nymphs (if present) and middle-stage workers are used (`pca_groups`), plus
 #    adult workers in Mbar (`pca_groups_extra`).
 # -----------------------------------------------------------------------------
 cat("\n[4] Reference-based PCA projection on Csec caste DEGs (reference: Csec)\n")
@@ -240,7 +280,7 @@ cat(sprintf("Top %d Csec caste DEGs (%s, n = %d vs. %s, n = %d): %d worker-biase
             max(top_deg$p)))
 
 # Samples used in the PCA (reference and projected species alike)
-pca_groups <- c("Late_Nymph", "Middle_Nymph", "Middle_Worker", "Middle_Small_worker")
+pca_groups <- c("Early_Nymph", "Middle_Nymph", "Late_Nymph", "Middle_Worker", "Middle_Small_worker")
 pca_groups_extra <- list(Mbar = c("Adult_Worker", "Adult_Small_worker"))
 groups <- lapply(setNames(species, species), function(sp)
   si$Sample_ID[si$Species == sp &
@@ -259,18 +299,6 @@ pca <- reverse_pca_multi(
   filter        = FALSE,                # genes already selected
   n_pc          = 5
 )
-pca_out <- pca[, c("PC1", "PC2", "PC3", "PC4", "PC5", "Sample_ID", "Species",
-                   "Caste", "Stage", "Stage_Caste", "set_")]
-write.csv(pca_out, file.path(out_dir, "4_reverse_pca.csv"), row.names = FALSE)
-
-# Mean position of each species x stage x caste group on PC1/PC2
-pca_summary <- pca_out %>%
-  group_by(Species, Stage_Caste) %>%
-  summarise(n = n(), PC1 = mean(PC1), PC2 = mean(PC2), .groups = "drop") %>%
-  arrange(Species, PC1) %>%
-  as.data.frame()
-write.csv(pca_summary, file.path(out_dir, "4_reverse_pca_group_means.csv"),
-          row.names = FALSE)
 cat(sprintf("Projected %d samples onto the PC space of %d Csec samples.\n",
             sum(pca$set_ == "target"), sum(pca$set_ == "ref")))
 
@@ -283,85 +311,31 @@ pca_plot <- ggplot2::ggplot(pca, ggplot2::aes(x = PC1, y = PC2, col = Caste, sha
 ggplot2::ggsave(file.path(out_dir, "4_reverse_pca.pdf"), pca_plot, width = 9, height = 7)
 
 # -----------------------------------------------------------------------------
-# 5. Illustration: expression of a candidate gene (Kr-h1, Krüppel homolog 1)
-#    across castes and stages in each species
+# 5. Illustration: expression of candidate genes across castes and stages in
+#    each species: Kr-h1 (Krüppel homolog 1) and Eip93F (Ecdysone-induced
+#    protein 93F, E93). One PDF per gene, one page per species.
 # -----------------------------------------------------------------------------
-cat("\n[5] Expression plots of Kr-h1\n")
+candidate_genes <- c("Kr-h1", "Eip93F")
+cat("\n[5] Expression plots of", paste(candidate_genes, collapse = " and "), "\n")
 
-pdf(file.path(out_dir, "5_Kr-h1_expression.pdf"), width = 7, height = 5)
-for (sp in species) {
-  d <- exp_list[[sp]]
-  # Order groups by developmental stage for plotting
-  sc <- unique(d$sampleInfo[order(match(d$sampleInfo$Stage,
-                                        c("Larva", stage_order)),
-                                  d$sampleInfo$Caste), "Stage_Caste"])
-  d$sampleInfo$Stage_Caste <- factor(d$sampleInfo$Stage_Caste, levels = sc)
-  p <- plot_single_candidate_dmel("Kr-h1", exp_data = d,
-                                  gene_info = as.data.frame(gene_info_demo[[sp]]),
-                                  x = "Stage_Caste", col = "Caste",
-                                  xlabel = paste(sp, "- stage and caste"))
-  print(p)
-  cat(sprintf("%s: plotted %s\n", sp, p$labels$title))
+for (gene in candidate_genes) {
+  pdf(file.path(out_dir, paste0("5_", gene, "_expression.pdf")), width = 7, height = 5)
+  for (sp in species) {
+    d <- exp_list[[sp]]
+    # Order groups by developmental stage for plotting
+    sc <- unique(d$sampleInfo[order(match(d$sampleInfo$Stage,
+                                          c("Larva", stage_order)),
+                                    d$sampleInfo$Caste), "Stage_Caste"])
+    d$sampleInfo$Stage_Caste <- factor(d$sampleInfo$Stage_Caste, levels = sc)
+    p <- plot_single_candidate_dmel(gene, exp_data = d,
+                                    gene_info = as.data.frame(gene_info_demo[[sp]]),
+                                    x = "Stage_Caste", col = "Caste",
+                                    xlabel = paste(sp, "- stage and caste"))
+    print(p)
+    cat(sprintf("%s %s: plotted %s\n", gene, sp, p$labels$title))
+  }
+  invisible(dev.off())
 }
-invisible(dev.off())
-
-# -----------------------------------------------------------------------------
-# Summary figure (base R graphics)
-# -----------------------------------------------------------------------------
-sp_cols   <- setNames(c("#1b9e77", "#d95f02", "#7570b3", "#e7298a"), species)
-caste_pch <- c(Nymph = 16, Worker = 17, Small_worker = 17, Large_worker = 17,
-               Small_soldier = 18, Large_soldier = 18, Queen = 15, King = 15)
-n_sp <- length(species)
-
-pdf(file.path(out_dir, "demo_figures.pdf"), width = 10, height = 9)
-par(mfrow = c(2, 2), mar = c(5, 5, 3, 1))
-
-# Panel A: distribution of Hedges' g per species
-dens <- lapply(hedges_tables, function(x) density(x$Hedges_g, na.rm = TRUE))
-plot(NULL, xlim = c(-5, 5), ylim = c(0, max(sapply(dens, function(d) max(d$y)))),
-     xlab = "Hedges' g (Worker vs. Nymph)", ylab = "Density",
-     main = "A. Between-caste divergence")
-for (sp in species) lines(dens[[sp]], col = sp_cols[sp], lwd = 2)
-abline(v = 0, lty = 2)
-legend("topleft", sprintf("%s (median |g| = %.2f)", species,
-                           hedges_summary[species, "median_abs_g"]),
-       col = sp_cols[species], lwd = 2, bty = "n", cex = 0.85)
-
-# Panel B: angular distance between species
-rev_idx <- n_sp:1
-# Colour scale capped at 0.5 (orthogonal); values above it get the darkest colour
-image(1:n_sp, 1:n_sp, pmin(ang, 0.5)[, rev_idx], col = hcl.colors(30, "YlOrRd", rev = TRUE),
-      zlim = c(0, 0.5), axes = FALSE, xlab = "", ylab = "",
-      main = "B. Angular distance of caste-bias profiles")
-axis(1, 1:n_sp, species); axis(2, 1:n_sp, species[rev_idx], las = 1)
-text(rep(1:n_sp, n_sp), rep(1:n_sp, each = n_sp), sprintf("%.2f", ang[, rev_idx]),
-     col = ifelse(ang[, rev_idx] > 0.3, "white", "black"))
-
-# Panel C: nymph distance to middle-stage workers, relative to baseline
-df_c <- do.call(rbind, lapply(dist_all, function(df)
-  data.frame(Species = df$Species, Stage = as.character(df$Stage),
-             rel = df$distance / df$dist_ref)))
-df_c$group <- factor(paste(df_c$Species, df_c$Stage),
-                     levels = unlist(lapply(species, function(sp)
-                       paste(sp, intersect(stage_order, df_c$Stage[df_c$Species == sp])))))
-par(mar = c(8, 5, 3, 1))
-boxplot(rel ~ group, data = df_c, las = 2, xlab = "",
-        col = sp_cols[sub(" .*", "", levels(df_c$group))],
-        ylab = "Distance / within-worker baseline",
-        main = "C. Nymph distance to middle-stage workers")
-abline(h = 1, lty = 2)
-par(mar = c(5, 5, 3, 7))
-
-# Panel D: cross-species PCA projection (legend in the right margin)
-plot(pca$PC1, pca$PC2, col = sp_cols[as.character(pca$Species)],
-     pch = caste_pch[as.character(pca$Caste)],
-     xlab = "PC1 (Csec caste-DEG space)", ylab = "PC2 (Csec caste-DEG space)",
-     main = "D. Cross-species PCA projection")
-legend("topleft", inset = c(1.02, 0), xpd = TRUE,
-       c(species, "Nymph", "Worker", "Soldier", "Queen/King"),
-       col = c(sp_cols[species], rep("grey30", 4)),
-       pch = c(rep(16, n_sp), 16, 17, 18, 15), bty = "n", cex = 0.85)
-invisible(dev.off())
 
 cat(sprintf("\nDone. Output written to ./%s/ (run time: %.1f s)\n",
             out_dir, as.numeric(difftime(Sys.time(), t_start, units = "secs"))))

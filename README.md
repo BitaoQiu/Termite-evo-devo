@@ -1,6 +1,6 @@
 # Termite-evo-devo
 
-Key functions developed for **"Tracking major evolutionary transitions to superorganisms"**, including quantification of between-caste divergence, evaluation of caste gene-regulatory similarity, measurement of between-caste distance across developmental stages, and principal-component projection of cross-species caste developmental trajectories.
+Key code developed for **"Tracking major evolutionary transitions to superorganisms"**, including quantification of between-caste divergence, evaluation of caste gene-regulatory similarity, measurement of between-caste distance across developmental stages, and principal-component projection of cross-species caste developmental trajectories.
 
 ## Repository contents
 
@@ -24,6 +24,7 @@ Key functions developed for **"Tracking major evolutionary transitions to supero
 | dplyr | 1.1.4 | CRAN |
 | EDASeq | 2.36.0 | Bioconductor (needed only for `combine_exp_data()`) |
 | sva | 3.50.0 | Bioconductor (needed only for `reverse_pca_multi()`) |
+| limma | 3.58.1 | Bioconductor (used in the demo for caste DEGs; installed with `sva`) |
 | ggplot2 | 3.4.4 | CRAN (needed only for `plot_single_candidate_dmel()`) |
 
 All other functions used (`lm`, `svd`, `dist`, `cor`, base graphics) are part of base R.
@@ -53,7 +54,7 @@ No non-standard hardware is required. The demo runs on a standard desktop or lap
 
    if (!requireNamespace("BiocManager", quietly = TRUE))
        install.packages("BiocManager")
-   BiocManager::install(c("EDASeq", "sva"))
+   BiocManager::install(c("EDASeq", "sva", "limma"))
    ```
 
 3. Download this repository:
@@ -79,7 +80,7 @@ About 5–10 minutes on a normal desktop computer for the R packages (most of th
 
 The demo data are head–prothorax RNA-seq data for four termite species, in two files.
 
-**`termite_exp_demo.Rdata`** contains `termite_exp_data_zscore_HP`, a named list with one entry per species:
+**`termite_exp_demo.Rdata`** contains `termite_exp_data_HP`, a named list with one entry per species:
 
 | Species | Code | Genes | Samples | Castes / stages |
 |---|---|---|---|---|
@@ -126,10 +127,19 @@ The script runs:
 
    Because the demo abundance data are already batch corrected, the model contains caste group only (`exp ~ Group`). For data that are not batch corrected, batch can be added as a covariate (see [`cal_hedges_g()`](#cal_hedges_g--between-caste-divergence)).
 
-2. **Similarity of caste-biased expression between species** — angular distance between the species' worker-vs-nymph Hedges' g profiles (contrasts as in step 1) over one-to-one orthologs, and a list of orthologs biased in the same direction in all species.
+2. **Similarity of caste-biased expression between species** — angular distance between the species' worker-vs-nymph log2 fold-change (LFC) profiles, over one-to-one orthologs that are caste DEGs in at least one species; |LFC| is capped at 3 so that a few extreme genes do not dominate. Also lists orthologs biased in the same direction in all species. The LFC contrasts differ from step 1:
+
+   | Species | Workers | Nymphs |
+   |---|---|---|
+   | `Csec` | Middle_Worker | Middle_Nymph + Late_Nymph |
+   | `Mdar` | Middle_Worker | Middle_Nymph |
+   | `Rgra` | Middle_Worker | Middle_Nymph |
+   | `Mbar` | Middle_Worker | Early_Nymph |
+
+   *This step is a simplified illustration:* LFC is the difference in mean log2(TPM) between the two groups, and DEGs are called with limma's moderated t-test (BH-adjusted p < 0.05) on the demo data. In the manuscript, LFCs and DEGs come from formal differential expression analysis; with real data, those LFCs are passed to `angular_distance_matrix_cols()` in the same way.
 3. **Between-caste distance across development** — Manhattan distance (per gene) of each nymph sample to middle-stage workers, by nymph stage, with the within-worker distance as a baseline.
-4. **Cross-species PCA projection on caste genes** — the top 200 caste DEGs in *C. secundus* (all nymphs vs. Middle_Worker, Welch t-test on abundance, among one-to-one orthologs) are selected; the PC space is built from *C. secundus* (the reference species in the manuscript) using only these genes, and the other three species are projected onto it after ComBat alignment (species as batch, reference unchanged). In all species, only Middle_Nymph, Late_Nymph, Middle_Worker and Middle_Small_worker samples are used, plus Adult_Worker and Adult_Small_worker in `Mbar`.
-5. **Illustration** — expression of *Kr-h1* (Krüppel homolog 1) across stages and castes in each species.
+4. **Cross-species PCA projection on caste genes** — the top 200 caste DEGs in *C. secundus* (all nymphs vs. Middle_Worker, Welch t-test on abundance, among one-to-one orthologs) are selected; the PC space is built from *C. secundus* (the reference species in the manuscript) using only these genes, and the other three species are projected onto it after ComBat alignment (species as batch, reference unchanged). In all species, only Early_Nymph (if present), Middle_Nymph, Late_Nymph, Middle_Worker and Middle_Small_worker samples are used, plus Adult_Worker and Adult_Small_worker in `Mbar`.
+5. **Illustration** — expression of *Kr-h1* (Krüppel homolog 1) and *Eip93F* (Ecdysone-induced protein 93F) across stages and castes in each species, with `plot_single_candidate_dmel()`.
 
 ### Expected output
 
@@ -137,19 +147,13 @@ The script prints progress and summary tables to the console and writes the foll
 
 | File | Content |
 |---|---|
-| `0_one2one_orthologs.csv` | One-to-one ortholog table used for cross-species analyses |
-| `1_hedges_g_<species>.csv` | Per-gene coefficient, residual SD, Cohen's d, Hedges' g, and gene annotation |
 | `1_hedges_g_summary.csv` | Contrast, sample sizes, number of genes and median \|g\| per species |
 | `2_angular_distance_species.csv` | Angular distance between species' caste-bias profiles (0 = same direction, 0.5 = orthogonal, 1 = opposite) |
-| `2_consistent_caste_bias.csv` | Orthologs biased in the same direction in all species, with annotation |
-| `3_sample_distance_<species>.csv` | Distance of every nymph sample to every middle-stage worker sample, with metadata |
+| `2_consistent_caste_bias.csv` | Orthologs biased in the same direction in all species, with capped LFC per species, number of species in which the gene is a DEG, and annotation |
 | `3_sample_distance_summary.csv` | Median distance per species and nymph stage, and the within-worker baseline |
 | `4_csec_caste_DEGs.csv` | The 200 *C. secundus* caste DEGs used for the PCA: orthogroup, mean difference (worker − nymph), t, p, bias, gene ID and *Drosophila* name |
-| `4_reverse_pca.csv` | PC1–PC5 scores for reference (`Csec`) and projected samples |
-| `4_reverse_pca_group_means.csv` | Mean PC1/PC2 per species, stage and caste |
 | `4_reverse_pca.pdf` | PC1 vs. PC2 per species, coloured by caste and shaped by stage |
-| `5_Kr-h1_expression.pdf` | *Kr-h1* expression by stage and caste, one page per species |
-| `demo_figures.pdf` | Summary figure: (A) Hedges' g distributions, (B) angular distance between species, (C) nymph-to-worker distances by stage, (D) cross-species PCA projection |
+| `5_Kr-h1_expression.pdf`, `5_Eip93F_expression.pdf` | *Kr-h1* and *Eip93F* expression by stage and caste, one page per species |
 
 Expected console output (values may differ in the last decimal places across platforms; ComBat progress messages omitted):
 
@@ -166,25 +170,31 @@ Combined: 8666 ortholog groups x 152 samples
     Mbar Adult_Small_worker vs. Late_Nymph         4        4   10974    1.4543576
 
 [2] Angular distance between species' caste-biased expression profiles
-Orthologs with g in all species: 5858
+Caste DEGs per species (one-to-one orthologs):
+ Species                                  Contrast n_DEG
+    Csec Middle_Worker vs. Middle_Nymph+Late_Nymph   104
+    Mdar            Middle_Worker vs. Middle_Nymph  1793
+    Rgra            Middle_Worker vs. Middle_Nymph  1215
+    Mbar             Middle_Worker vs. Early_Nymph   778
+Orthologs that are DEGs in at least one species: 3239
       Csec  Mdar  Rgra  Mbar
-Csec 0.000 0.465 0.430 0.478
-Mdar 0.465 0.000 0.418 0.482
-Rgra 0.430 0.418 0.000 0.426
-Mbar 0.478 0.482 0.426 0.000
+Csec 0.000 0.483 0.424 0.513
+Mdar 0.483 0.000 0.424 0.470
+Rgra 0.424 0.424 0.000 0.497
+Mbar 0.513 0.470 0.497 0.000
 
-Orthologs biased in the same direction in all species: 1137; top 10:
- Orthogroup   Csec   Mdar   Rgra   Mbar   Bias Dmel_name                              Description
-  OG0007313 -11.29 -12.25  -8.49 -11.30  Nymph      <NA>                                     <NA>
-  OG0003940  -5.25  -5.01 -10.30  -5.82  Nymph        Fs                              Follistatin
-  OG0007340   4.94   7.54   7.98   4.14 Worker     Kr-h1                                     <NA>
-  OG0002335  -2.79  -2.99  -3.17  -2.58  Nymph      <NA> deoxynucleotidyltransferase terminal-int
-  OG0000657  -3.66  -2.65  -3.09  -2.31  Nymph      <NA>   E3 ubiquitin-protein ligase RNF14-like
-  OG0009994  -2.18  -3.23  -2.05  -7.20  Nymph      Lsp2                           hexamerin-like
-  OG0002228  -2.33  -1.89  -3.56  -4.19  Nymph       EcR                        Ecdysone receptor
-  OG0006718   1.94   1.84   2.37   4.72 Worker      <NA>                                     <NA>
-  OG0003220   1.83   2.35   4.51   4.33 Worker       Idh isocitrate dehydrogenase [NADP], mitocho
-  OG0006217   2.17   2.02   1.83   2.61 Worker      Fur1         neuroendocrine convertase 1-like
+Orthologs biased in the same direction in all species: 680; top 10:
+ Orthogroup  Csec  Mdar  Rgra  Mbar   Bias n_species_DEG Dmel_name                              Description
+  OG0003120 -3.00 -3.00 -3.00 -3.00  Nymph             4      Lsp2                           hexamerin-like
+  OG0007313 -3.00 -3.00 -3.00 -3.00  Nymph             4      <NA>                                     <NA>
+  OG0009994 -3.00 -3.00 -3.00 -2.85  Nymph             2      Lsp2                           hexamerin-like
+  OG0007185 -1.32 -1.35 -1.94 -3.00  Nymph             4        cd             peroxidasin homolog cardinal
+  OG0009166 -1.32 -3.00 -1.41 -2.07  Nymph             4      Arr2                               arrestin 2
+  OG0007811 -1.51 -2.09 -1.08 -2.27  Nymph             3        nw                                   narrow
+  OG0007340  1.02  1.16  1.13  1.19 Worker             3     Kr-h1                                     <NA>
+  OG0000879 -0.92 -1.11 -1.12 -1.01  Nymph             3       Jhe           juvenile hormone esterase-like
+  OG0002392 -3.00 -3.00 -0.87 -3.00  Nymph             3      <NA>                                     <NA>
+  OG0005137 -0.74 -1.11 -0.78 -1.11  Nymph             3       chp leucine rich repeat containing G protein
 
 [3] Distance of nymph samples to middle-stage workers
  Species  Stage median_distance within_worker_baseline
@@ -203,18 +213,22 @@ Orthologs biased in the same direction in all species: 1137; top 10:
 [4] Reference-based PCA projection on Csec caste DEGs (reference: Csec)
 Top 200 Csec caste DEGs (Middle_Worker, n = 10 vs. Late_Nymph+Middle_Nymph, n = 7): 93 worker-biased, 107 nymph-biased; max p = 0.0042
       
-       Late_Nymph Middle_Nymph Middle_Worker Middle_Small_worker Adult_Worker Adult_Small_worker
-  Csec          3            4            10                   0            0                  0
-  Mdar          3            6            11                   0            0                  0
-  Rgra          4            4            15                   0            0                  0
-  Mbar          4            4             4                   4            4                  4
-Projected 67 samples onto the PC space of 17 Csec samples.
+       Early_Nymph Middle_Nymph Late_Nymph Middle_Worker Middle_Small_worker Adult_Worker Adult_Small_worker
+  Csec           0            4          3            10                   0            0                  0
+  Mdar           0            6          3            11                   0            0                  0
+  Rgra           0            4          4            15                   0            0                  0
+  Mbar           4            4          4             4                   4            4                  4
+Projected 71 samples onto the PC space of 17 Csec samples.
 
-[5] Expression plots of Kr-h1
-Csec: plotted gene-Csec_013894
-Mdar: plotted gene-Mdar_013062
-Rgra: plotted gene-Rgra_003466
-Mbar: plotted gene-Mbar_008534
+[5] Expression plots of Kr-h1 and Eip93F 
+Kr-h1 Csec: plotted gene-Csec_013894
+Kr-h1 Mdar: plotted gene-Mdar_013062
+Kr-h1 Rgra: plotted gene-Rgra_003466
+Kr-h1 Mbar: plotted gene-Mbar_008534
+Eip93F Csec: plotted gene-Csec_019594
+Eip93F Mdar: plotted gene-Mdar_002584
+Eip93F Rgra: plotted gene-Rgra_011182
+Eip93F Mbar: plotted gene-Mbar_011384
 
 Done. Output written to ./demo_output/ (run time: ~110 s)
 ```

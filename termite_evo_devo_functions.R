@@ -456,16 +456,16 @@ cal_sample_dist = function(
   colnames(col_info) <- c("col_sample", "Caste", "Stage", "Species")
   
   df_long2 <- df_long %>%
-    left_join(row_info, by = "row_sample") %>%
-    left_join(col_info, by = "col_sample") %>%
+    dplyr::left_join(row_info, by = "row_sample") %>%
+    dplyr::left_join(col_info, by = "col_sample") %>%
     # Summary distance of each reference sample to all target samples
     # (median, robust to single outlier targets)
-    group_by(col_sample) %>%
-    mutate(median_dist = median(distance, na.rm = TRUE)) %>%
-    ungroup() %>%
+    dplyr::group_by(col_sample) %>%
+    dplyr::mutate(median_dist = median(distance, na.rm = TRUE)) %>%
+    dplyr::ungroup() %>%
     # Order reference samples by stage, then by closeness to targets (for plotting)
-    arrange(Stage, median_dist) %>%
-    mutate(
+    dplyr::arrange(Stage, median_dist) %>%
+    dplyr::mutate(
       col_sample = factor(col_sample, levels = unique(col_sample)),
       dist_ref = dist_ref
     )
