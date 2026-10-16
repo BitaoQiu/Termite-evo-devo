@@ -85,14 +85,14 @@ The demo data are head–prothorax RNA-seq data for four termite species, in two
 | Species | Code | Genes | Samples | Castes / stages |
 |---|---|---|---|---|
 | *Cryptotermes secundus* | `Csec` | 20,736 | 27 | workers (larva, early, middle), nymphs (middle, late) |
-| *Mastotermes darwiniensis* | `Mdar` | 16,550 | 28 | workers (larva, middle), nymphs (middle, late, final) |
-| *Reticulitermes grassei* | `Rgra` | 18,103 | 46 | workers (early, middle), nymphs (middle, late), adult kings and queens |
+| *Mastotermes darwiniensis* | `Mdar` | 16,550 | 28 | workers (larva, middle), nymphs (early, late, final) |
+| *Reticulitermes grassei* | `Rgra` | 18,103 | 46 | workers (early, middle), nymphs (early, late), adult kings and queens |
 | *Macrotermes barneyi* | `Mbar` | 19,703 | 51 | small and large workers, small and large soldiers (middle to adult), nymphs (early to adult) |
 
 Each species entry contains:
 
 - `abundance` — normalized expression matrix (batch corrected), log2(TPM) scale (genes × samples)
-- `sampleInfo` — sample metadata, one row per sample in the same order as the matrix columns; key columns are `Sample_ID`, `Caste`, `Stage`, `Stage_Caste`, `BatchDate`, and `Species`
+- `sampleInfo` — sample metadata, one row per sample in the same order as the matrix columns; columns are `Sample_ID`, `Ind`, `Caste`, `Stage`, `Stage_Caste`, `Tissue`, `Colony` and `BatchDate` (the demo adds `Species` from the list name)
 
 **`termite_gene_info_demo.Rdata`** contains:
 
@@ -132,13 +132,13 @@ The script runs:
    | Species | Workers | Nymphs |
    |---|---|---|
    | `Csec` | Middle_Worker | Middle_Nymph + Late_Nymph |
-   | `Mdar` | Middle_Worker | Middle_Nymph |
-   | `Rgra` | Middle_Worker | Middle_Nymph |
+   | `Mdar` | Middle_Worker | Early_Nymph |
+   | `Rgra` | Middle_Worker | Early_Nymph |
    | `Mbar` | Middle_Worker | Early_Nymph |
 
    *This step is a simplified illustration:* LFC is the difference in mean log2(TPM) between the two groups, and DEGs are called with limma's moderated t-test (BH-adjusted p < 0.05) on the demo data. In the manuscript, LFCs and DEGs come from formal differential expression analysis; with real data, those LFCs are passed to `angular_distance_matrix_cols()` in the same way.
 3. **Between-caste distance across development** — Manhattan distance (per gene) of each nymph sample to middle-stage workers, by nymph stage, with the within-worker distance as a baseline.
-4. **Cross-species PCA projection on caste genes** — the top 200 caste DEGs in *C. secundus* (all nymphs vs. Middle_Worker, Welch t-test on abundance, among one-to-one orthologs) are selected; the PC space is built from *C. secundus* (the reference species in the manuscript) using only these genes, and the other three species are projected onto it after ComBat alignment (species as batch, reference unchanged). In all species, only Early_Nymph (if present), Middle_Nymph, Late_Nymph, Middle_Worker and Middle_Small_worker samples are used, plus Adult_Worker and Adult_Small_worker in `Mbar`.
+4. **Cross-species PCA projection on caste genes** — the top 200 caste DEGs in *C. secundus* (all nymphs vs. Middle_Worker, Welch t-test on abundance, among one-to-one orthologs) are selected; the PC space is built from *C. secundus* (the reference species in the manuscript) using only these genes, and the other three species are projected onto it after ComBat alignment (species as batch, reference unchanged). In all species, only Early_Nymph, Middle_Nymph and Late_Nymph (whichever are present), Middle_Worker and Middle_Small_worker samples are used, plus Adult_Worker and Adult_Small_worker in `Mbar`.
 5. **Illustration** — expression of *Kr-h1* (Krüppel homolog 1) and *Eip93F* (Ecdysone-induced protein 93F) across stages and castes in each species, with `plot_single_candidate_dmel()`.
 
 ### Expected output
@@ -149,6 +149,7 @@ The script prints progress and summary tables to the console and writes the foll
 |---|---|
 | `1_hedges_g_summary.csv` | Contrast, sample sizes, number of genes and median \|g\| per species |
 | `2_angular_distance_species.csv` | Angular distance between species' caste-bias profiles (0 = same direction, 0.5 = orthogonal, 1 = opposite) |
+| `2_angular_distance_tree.pdf` | Hierarchical clustering of species by angular distance (`hclust`) |
 | `2_consistent_caste_bias.csv` | Orthologs biased in the same direction in all species, with capped LFC per species, number of species in which the gene is a DEG, and annotation |
 | `3_sample_distance_summary.csv` | Median distance per species and nymph stage, and the within-worker baseline |
 | `4_csec_caste_DEGs.csv` | The 200 *C. secundus* caste DEGs used for the PCA: orthogroup, mean difference (worker − nymph), t, p, bias, gene ID and *Drosophila* name |
@@ -173,8 +174,8 @@ Combined: 8666 ortholog groups x 152 samples
 Caste DEGs per species (one-to-one orthologs):
  Species                                  Contrast n_DEG
     Csec Middle_Worker vs. Middle_Nymph+Late_Nymph   104
-    Mdar            Middle_Worker vs. Middle_Nymph  1793
-    Rgra            Middle_Worker vs. Middle_Nymph  1215
+    Mdar             Middle_Worker vs. Early_Nymph  1793
+    Rgra             Middle_Worker vs. Early_Nymph  1215
     Mbar             Middle_Worker vs. Early_Nymph   778
 Orthologs that are DEGs in at least one species: 3239
       Csec  Mdar  Rgra  Mbar
@@ -200,10 +201,10 @@ Orthologs biased in the same direction in all species: 680; top 10:
  Species  Stage median_distance within_worker_baseline
     Csec Middle       0.4004395              0.3057668
     Csec   Late       0.3478501              0.3057668
-    Mdar Middle       0.4095333              0.3406655
+    Mdar  Early       0.4095333              0.3406655
     Mdar   Late       0.4362442              0.3406655
     Mdar  Final       0.6929000              0.3406655
-    Rgra Middle       0.3804718              0.2849457
+    Rgra  Early       0.3804718              0.2849457
     Rgra   Late       0.3593370              0.2849457
     Mbar  Early       0.5216510              0.3605829
     Mbar Middle       0.3843661              0.3605829
@@ -215,8 +216,8 @@ Top 200 Csec caste DEGs (Middle_Worker, n = 10 vs. Late_Nymph+Middle_Nymph, n = 
       
        Early_Nymph Middle_Nymph Late_Nymph Middle_Worker Middle_Small_worker Adult_Worker Adult_Small_worker
   Csec           0            4          3            10                   0            0                  0
-  Mdar           0            6          3            11                   0            0                  0
-  Rgra           0            4          4            15                   0            0                  0
+  Mdar           6            0          3            11                   0            0                  0
+  Rgra           4            0          4            15                   0            0                  0
   Mbar           4            4          4             4                   4            4                  4
 Projected 71 samples onto the PC space of 17 Csec samples.
 
@@ -277,7 +278,7 @@ combined <- combine_exp_data(exp_data        = exp_list,
                              species_list    = c("Csec", "Mdar", "Rgra"))
 ```
 
-The output holds `abundance` (ortholog groups present in all species), `abundance.quantile` (between-sample normalized across species), `counts` (if given for all species), and the merged `sampleInfo`. Each species' `sampleInfo` needs the columns `Sample_ID`, `Ind`, `Caste`, `Colony`, `Stage`, `Stage_Caste`, `Tissue`, `Species`, `BatchDate` and `Batch`, in the same order as the matrix columns.
+The output holds `abundance` (ortholog groups present in all species), `abundance.quantile` (between-sample normalized across species), `counts` (if given for all species), and the merged `sampleInfo`. Each species' `sampleInfo` needs the columns `Sample_ID`, `Caste`, `Stage` and `Stage_Caste`, in the same order as the matrix columns. `Species` is taken from the list name if absent; `Ind`, `Colony`, `Tissue`, `BatchDate` and `Batch` are kept if present.
 
 #### `cal_hedges_g()` — between-caste divergence
 

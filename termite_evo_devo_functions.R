@@ -92,7 +92,11 @@ get_one2one_orthologs = function(ortho_info,
 #'                        codes, e.g. "Znev"). Each element holds `abundance`
 #'                        and `sampleInfo`, and optionally `abundance_correct`
 #'                        (used in place of `abundance` when present), `counts`
-#'                        and `abundance_weighted_z`.
+#'                        and `abundance_weighted_z`. `sampleInfo` needs
+#'                        Sample_ID, Caste, Stage and Stage_Caste; Species is
+#'                        taken from the list name if absent, and Ind, Colony,
+#'                        Tissue, BatchDate and Batch are kept if present
+#'                        (NA otherwise).
 #' @param ortho_info      One-to-one ortholog table: one row per ortholog group,
 #'                        a `GeneID` column with the group ID, and one column per
 #'                        species code holding that species' gene ID (as in the
@@ -206,11 +210,17 @@ combine_exp_data = function(exp_data,
   # --- Merge sample metadata --------------------------------------------------
   target_atr <- c("Sample_ID", "Ind", "Caste", "Colony", "Stage", "Stage_Caste",
                   "Tissue", "Species", "BatchDate", "Batch")
+  required_atr <- c("Sample_ID", "Caste", "Stage", "Stage_Caste")
   for (sp in species_list) {
-    miss <- setdiff(target_atr, colnames(exp_data[[sp]]$sampleInfo))
+    si <- exp_data[[sp]]$sampleInfo
+    miss <- setdiff(required_atr, colnames(si))
     if (length(miss) > 0) {
       stop("sampleInfo of ", sp, " lacks column(s): ", paste(miss, collapse = ", "))
     }
+    # Species from the list name if absent; other bookkeeping columns NA
+    if (is.null(si$Species)) si$Species <- sp
+    for (col in setdiff(target_atr, colnames(si))) si[[col]] <- NA
+    exp_data[[sp]]$sampleInfo <- si
   }
   exp_data_full$sampleInfo <- do.call(rbind, lapply(species_list, function(sp) {
     exp_data[[sp]]$sampleInfo[, target_atr]

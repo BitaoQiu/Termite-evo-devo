@@ -33,6 +33,8 @@ load("termite_exp_demo.Rdata")
 load("termite_gene_info_demo.Rdata")
 exp_list <- termite_exp_data_HP
 species  <- c("Csec", "Mdar", "Rgra", "Mbar")
+# Species label for each sample (used when combining species and in summaries)
+for (sp in species) exp_list[[sp]]$sampleInfo$Species <- sp
 for (sp in species) {
   cat(sprintf("%s: %d genes x %d samples\n", sp,
               nrow(exp_list[[sp]]$abundance), ncol(exp_list[[sp]]$abundance)))
@@ -126,8 +128,8 @@ cat("\n[2] Angular distance between species' caste-biased expression profiles\n"
 # Worker-vs-nymph contrasts for the LFC profiles (Stage_Caste groups)
 lfc_contrasts <- list(
   Csec = list(nymph = c("Middle_Nymph", "Late_Nymph"), worker = "Middle_Worker"),
-  Mdar = list(nymph = "Middle_Nymph", worker = "Middle_Worker"),
-  Rgra = list(nymph = "Middle_Nymph", worker = "Middle_Worker"),
+  Mdar = list(nymph = "Early_Nymph",  worker = "Middle_Worker"),
+  Rgra = list(nymph = "Early_Nymph",  worker = "Middle_Worker"),
   Mbar = list(nymph = "Early_Nymph",  worker = "Middle_Worker")
 )
 deg_fdr <- 0.05   # adjusted p-value threshold for calling a caste DEG
@@ -172,6 +174,12 @@ cat(sprintf("Orthologs that are DEGs in at least one species: %d\n", nrow(lfc_pr
 ang <- angular_distance_matrix_cols(lfc_profiles)
 print(round(ang, 3))
 write.csv(round(ang, 4), file.path(out_dir, "2_angular_distance_species.csv"))
+
+# Clustering of species by the similarity of their caste-biased expression
+pdf(file.path(out_dir, "2_angular_distance_tree.pdf"), width = 5, height = 5)
+plot(hclust(as.dist(ang)), hang = -1, main = "Species clustered by caste-bias profiles",
+     xlab = "", sub = "", ylab = "Angular distance")
+invisible(dev.off())
 
 # Orthologs with the most consistent caste bias: same sign of LFC in all
 # species, ranked by the smallest |LFC| among species
